@@ -1,0 +1,56 @@
+[
+  {
+    "id": "c2b3db31-11bd-4b4e-8547-448dfcafcdfa",
+    "name": "Groceries",
+    "wallet_id": "fb57e049-f6fa-4e08-9a76-49f5f07ce80c",
+    "type": "daily"
+  },
+  {
+    "id": "93a62e5d-26ef-43f2-90e0-5f0ce85f45dd",
+    "name": "Utilities",
+    "wallet_id": "fb57e049-f6fa-4e08-9a76-49f5f07ce80c",
+    "type": "subscription"
+  },
+  {
+    "id": "209fa118-ed44-4383-8510-2906e92fe1db",
+    "name": "Transport",
+    "wallet_id": "fb57e049-f6fa-4e08-9a76-49f5f07ce80c",
+    "type": "daily"
+  },
+  {
+    "id": "fafec11c-f527-4990-a634-7fff83c1366a",
+    "name": "Cafe",
+    "wallet_id": "a53251bc-4475-4b22-a2d3-5e59769e1aa7",
+    "type": "daily"
+  },
+  {
+    "id": "b4aebb64-15a5-479e-8d61-8ed8fdd04fe5",
+    "name": "Dining Out",
+    "wallet_id": "a53251bc-4475-4b22-a2d3-5e59769e1aa7",
+    "type": "daily"
+  },
+  {
+    "id": "ed19bead-b5c7-48e2-83a6-ceafbee71b60",
+    "name": "Entertainment",
+    "wallet_id": "a53251bc-4475-4b22-a2d3-5e59769e1aa7",
+    "type": "daily"
+  },
+  {
+    "id": "02e07ad0-f04f-4ac5-bb1b-47b2870a6889",
+    "name": "Flight",
+    "wallet_id": "7b683b75-d16f-478b-9491-8ca73cac4182",
+    "type": "unexpected"
+  },
+  {
+    "id": "c92faa2a-af3e-41bc-b8cc-3163c5fca4a5",
+    "name": "Hotel",
+    "wallet_id": "7b683b75-d16f-478b-9491-8ca73cac4182",
+    "type": "unexpected"
+  },
+  {
+    "id": "436fc094-95a0-4b07-926e-b4e9f6a171b4",
+    "name": "Stocks/ETF",
+    "wallet_id": "d538c2bf-d5e1-464b-80aa-f418318f29a7",
+    "type": "planned"
+  }
+]

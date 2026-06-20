@@ -1,0 +1,30 @@
+[
+  {
+    "id": "fb57e049-f6fa-4e08-9a76-49f5f07ce80c",
+    "name": "Basic Survival",
+    "budget": 10000,
+    "color": "#10b981",
+    "icon": "🏠"
+  },
+  {
+    "id": "7b683b75-d16f-478b-9491-8ca73cac4182",
+    "name": "Travelling",
+    "budget": 5000,
+    "color": "#3b82f6",
+    "icon": "✈️"
+  },
+  {
+    "id": "a53251bc-4475-4b22-a2d3-5e59769e1aa7",
+    "name": "Relax",
+    "budget": 3000,
+    "color": "#f59e0b",
+    "icon": "☕"
+  },
+  {
+    "id": "d538c2bf-d5e1-464b-80aa-f418318f29a7",
+    "name": "Investment",
+    "budget": 8000,
+    "color": "#8b5cf6",
+    "icon": "📈"
+  }
+]
