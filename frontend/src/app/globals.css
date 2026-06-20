@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-100 p-6;
+  }
+  .stat-card {
+    @apply bg-white rounded-xl shadow-sm border border-gray-100 p-5;
+  }
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-4 py-2 rounded-lg font-medium text-sm transition-colors cursor-pointer disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply bg-indigo-600 text-white hover:bg-indigo-700;
+  }
+  .btn-secondary {
+    @apply bg-gray-100 text-gray-700 hover:bg-gray-200;
+  }
+  .btn-icon {
+    @apply p-1.5 rounded hover:bg-gray-100 cursor-pointer transition-colors text-base leading-none;
+  }
+  .form-group {
+    @apply flex flex-col gap-1 mb-4;
+  }
+  .form-label {
+    @apply text-sm font-medium text-gray-700;
+  }
+  .form-input {
+    @apply border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 w-full;
+  }
+  .progress-bar {
+    @apply h-2 bg-gray-100 rounded-full overflow-hidden my-1;
+  }
+  .progress-fill {
+    @apply h-full rounded-full transition-all;
+  }
+  .list-item {
+    @apply flex items-center justify-between py-3 border-b border-gray-50 last:border-0;
+  }
+  .badge {
+    @apply text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full;
+  }
+  .type-tag {
+    @apply text-xs font-medium px-2 py-0.5 rounded-full;
+  }
+}
