@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+COPY main.py config.py db.py models.py ./
+COPY routers ./routers
 
 RUN mkdir -p /app/data
 

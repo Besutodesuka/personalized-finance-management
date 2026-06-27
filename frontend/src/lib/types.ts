@@ -28,8 +28,21 @@ export interface Subscription {
   name: string
   amount: number
   billing_day: number
+  billing_cycle: 'monthly' | 'yearly'
+  renewal_date: string | null
   wallet_id: string
   active: boolean
+}
+
+export interface MasterWallet {
+  balance: number
+}
+
+export interface RefillResult {
+  ok: boolean
+  deducted: number
+  new_balance: number
+  distributions: { wallet: string; amount: number }[]
 }
 
 export interface WalletBreakdown {
