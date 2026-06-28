@@ -47,4 +47,5 @@ class ChatHistoryItem(BaseModel):
 
 class ChatMessage(BaseModel):
     message: str
+    session_id: Optional[str] = None
     history: list[ChatHistoryItem] = []

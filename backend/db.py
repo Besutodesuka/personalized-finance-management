@@ -101,6 +101,24 @@ def init_db():
                 id INTEGER PRIMARY KEY,
                 balance REAL NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New chat',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL DEFAULT '',
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,          -- 'user' | 'assistant' | 'system' (compacted summary)
+                content TEXT NOT NULL,
+                actions TEXT,                -- JSON array of tool results (assistant only)
+                token_est INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_seq ON chat_messages (seq);
+            CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages (session_id);
         """)
 
 
@@ -114,6 +132,28 @@ def migrate_schema():
             conn.execute("ALTER TABLE subscriptions ADD COLUMN renewal_date TEXT")
         if conn.execute("SELECT COUNT(*) FROM master_wallet").fetchone()[0] == 0:
             conn.execute("INSERT INTO master_wallet (id, balance) VALUES (1, 0)")
+
+        # chat_messages predates sessions: add session_id and fold any orphan
+        # messages into one recovered session so old history stays reachable.
+        chat_cols = [row[1] for row in conn.execute("PRAGMA table_info(chat_messages)")]
+        if chat_cols and "session_id" not in chat_cols:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+        orphans = conn.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id = '' OR session_id IS NULL"
+        ).fetchone()[0]
+        if orphans:
+            import uuid
+            from datetime import datetime
+            sid = str(uuid.uuid4())
+            now = datetime.now().isoformat()
+            conn.execute(
+                "INSERT INTO chat_sessions (id, title, created_at, updated_at) VALUES (?,?,?,?)",
+                (sid, "Recovered chat", now, now),
+            )
+            conn.execute(
+                "UPDATE chat_messages SET session_id=? WHERE session_id = '' OR session_id IS NULL",
+                (sid,),
+            )
 
 
 def migrate_json():

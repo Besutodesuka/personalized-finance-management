@@ -9,6 +9,7 @@ services:
     environment:
       - VLLM_URL=${VLLM_URL:-http://ollama:11434}
       - MODEL_NAME=${MODEL_NAME:-qwen2.5:3b}
+      - CHAT_THINK=${CHAT_THINK:-true}
     restart: unless-stopped
 
   frontend:

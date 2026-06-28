@@ -4,13 +4,82 @@ import json
 from datetime import datetime
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
-from config import MODEL_NAME, VLLM_URL
+from config import CHAT_THINK, MODEL_NAME, VLLM_URL
 from db import get_db, insert, new_id, row_to_dict, update
 from models import ChatMessage
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# Compact prior conversation once it grows past this many estimated tokens.
+CONTEXT_TOKEN_LIMIT = 8000
+# After compaction, keep this many recent tokens verbatim; older turns get summarized.
+RECENT_TOKEN_BUDGET = 4000
+
+
+def _est_tokens(text: str) -> int:
+    # ~4 chars/token heuristic; no tokenizer dependency needed.
+    return max(1, len(text or "") // 4)
+
+
+def _next_seq(conn) -> int:
+    return conn.execute(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM chat_messages"
+    ).fetchone()["n"]
+
+
+def _save_message(conn, session_id: str, role: str, content: str,
+                  actions: list | None = None) -> dict:
+    row = {
+        "id": new_id(),
+        "session_id": session_id,
+        "seq": _next_seq(conn),
+        "role": role,
+        "content": content,
+        "actions": json.dumps(actions, ensure_ascii=False) if actions else None,
+        "token_est": _est_tokens(content),
+        "created_at": datetime.now().isoformat(),
+    }
+    insert(conn, "chat_messages", row)
+    return row
+
+
+def _load_messages(conn, session_id: str) -> list[dict]:
+    return [row_to_dict(r) for r in conn.execute(
+        "SELECT * FROM chat_messages WHERE session_id=? ORDER BY seq ASC", (session_id,)
+    )]
+
+
+def _ensure_session(session_id: str | None) -> str:
+    """Return a valid session id, creating a fresh session when none is given."""
+    with get_db() as conn:
+        if session_id:
+            r = conn.execute("SELECT id FROM chat_sessions WHERE id=?", (session_id,)).fetchone()
+            if r:
+                return session_id
+        sid = new_id()
+        now = datetime.now().isoformat()
+        insert(conn, "chat_sessions", {
+            "id": sid, "title": "New chat", "created_at": now, "updated_at": now,
+        })
+        return sid
+
+
+def _touch_session(conn, session_id: str, first_user_msg: str | None = None) -> None:
+    """Bump updated_at; title the session from its first user message."""
+    now = datetime.now().isoformat()
+    if first_user_msg:
+        r = conn.execute("SELECT title FROM chat_sessions WHERE id=?", (session_id,)).fetchone()
+        if r and (r["title"] or "") in ("", "New chat"):
+            title = " ".join(first_user_msg.split())[:48] or "New chat"
+            conn.execute(
+                "UPDATE chat_sessions SET title=?, updated_at=? WHERE id=?",
+                (title, now, session_id),
+            )
+            return
+    conn.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (now, session_id))
 
 
 CHAT_TOOLS = [
@@ -109,6 +178,40 @@ CHAT_TOOLS = [
             "name": "list_subscriptions",
             "description": "List all subscriptions with their IDs, amounts and status.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_wallet_budget",
+            "description": "Set the monthly budget limit of a single wallet to an exact amount.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "wallet_name": {"type": "string", "description": "Wallet name (e.g. 'Basic Survival')"},
+                    "budget": {"type": "number", "description": "New monthly budget in THB"},
+                },
+                "required": ["wallet_name", "budget"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_total_budget",
+            "description": (
+                "Set the TOTAL monthly budget across all wallets to an exact amount. "
+                "Use when the user gives one overall number (e.g. 'set my budget to 36000'). "
+                "Scales each wallet proportionally to its current share. Budgets are the ongoing "
+                "monthly allocation — there is no separate per-month budget."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "total": {"type": "number", "description": "Target total monthly budget in THB"},
+                },
+                "required": ["total"],
+            },
         },
     },
 ]
@@ -245,6 +348,40 @@ def _execute_tool(name: str, args: dict) -> dict:
             )]
         return {"ok": True, "action": "list_subscriptions", "subscriptions": rows}
 
+    if name == "set_wallet_budget":
+        wallet_name = args.get("wallet_name", "")
+        new_budget = args["budget"]
+        with get_db() as conn:
+            wallet = _find_wallet(conn, wallet_name)
+            if not wallet:
+                return {"ok": False, "error": f"Wallet '{wallet_name}' not found"}
+            update(conn, "wallets", wallet["id"], {"budget": new_budget})
+        return {"ok": True, "action": "set_wallet_budget", "wallet": wallet["name"],
+                "old_budget": wallet["budget"], "budget": new_budget}
+
+    if name == "set_total_budget":
+        target = args["total"]
+        if target < 0:
+            return {"ok": False, "error": "Total budget must be >= 0"}
+        with get_db() as conn:
+            wallets = [row_to_dict(r) for r in conn.execute("SELECT * FROM wallets")]
+            if not wallets:
+                return {"ok": False, "error": "No wallets to budget"}
+            current_total = sum(w["budget"] for w in wallets)
+            # Scale by current share; split evenly if there's nothing to scale from.
+            allocations: list[float] = []
+            for w in wallets:
+                share = (w["budget"] / current_total) if current_total > 0 else (1 / len(wallets))
+                allocations.append(round(target * share))
+            # Push rounding drift onto the last wallet so the parts sum exactly to target.
+            allocations[-1] += round(target) - sum(allocations)
+            distributions = []
+            for w, amt in zip(wallets, allocations):
+                update(conn, "wallets", w["id"], {"budget": amt})
+                distributions.append({"wallet": w["name"], "old_budget": w["budget"], "budget": amt})
+        return {"ok": True, "action": "set_total_budget", "old_total": current_total,
+                "total": round(target), "distributions": distributions}
+
     return {"ok": False, "error": f"Unknown tool: {name}"}
 
 
@@ -280,57 +417,257 @@ Available categories:
 
 Total spent this month: {sum(e['amount'] for e in expenses):,.0f} THB across {len(expenses)} transactions.
 
+Total monthly budget (sum of wallet budgets): {sum(w['budget'] for w in wallet_lines):,.0f} THB.
+
 You can add/update expenses and subscriptions using the provided tools. When the user says they spent money, call add_expense. When they mention a subscription, call add_subscription. For updates, first call list_expenses or list_subscriptions to get the ID, then update.
+To change a single wallet's limit, call set_wallet_budget. When the user gives one overall budget number (e.g. "set my budget to 36000"), call set_total_budget. Budgets are the ongoing monthly allocation — there is no separate per-month budget, so a request like "next month's budget" updates the same monthly budget.
 Answer in the same language as the user. Use THB currency."""
+
+
+async def _summarize(client: httpx.AsyncClient, rows: list[dict]) -> str:
+    """Condense old turns into one paragraph of durable context."""
+    transcript = "\n".join(f"{r['role']}: {r['content']}" for r in rows)
+    resp = await client.post(
+        f"{VLLM_URL}/api/chat",
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": (
+                    "Summarize this personal-finance assistant conversation concisely. "
+                    "Preserve concrete facts: amounts, wallet/category names, dates, IDs, "
+                    "decisions made, and any unresolved request. Output a compact paragraph."
+                )},
+                {"role": "user", "content": transcript},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 512},
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()["message"].get("content", "").strip()
+
+
+async def _compact_if_needed(conn, client: httpx.AsyncClient, session_id: str) -> None:
+    """When stored history exceeds the token limit, fold older turns into a rolling
+    summary row, deleting the originals. Idempotent and safe to call every turn."""
+    rows = _load_messages(conn, session_id)
+    if sum(r["token_est"] for r in rows) <= CONTEXT_TOKEN_LIMIT:
+        return
+
+    # Keep the newest turns (>= last 2) within RECENT_TOKEN_BUDGET; summarize the rest.
+    recent: list[dict] = []
+    acc = 0
+    for r in reversed(rows):
+        if acc + r["token_est"] > RECENT_TOKEN_BUDGET and len(recent) >= 2:
+            break
+        recent.append(r)
+        acc += r["token_est"]
+    old = rows[: len(rows) - len(recent)]
+    if not old:
+        return
+
+    summary = await _summarize(client, old)
+    if not summary:
+        return
+
+    ids = ",".join("?" for _ in old)
+    conn.execute(f"DELETE FROM chat_messages WHERE id IN ({ids})", tuple(r["id"] for r in old))
+    # Re-insert summary at the front (lowest seq) so it leads the rebuilt context.
+    min_seq = min(r["seq"] for r in old)
+    insert(conn, "chat_messages", {
+        "id": new_id(),
+        "session_id": session_id,
+        "seq": min_seq,
+        "role": "system",
+        "content": f"[Summary of earlier conversation]\n{summary}",
+        "actions": None,
+        "token_est": _est_tokens(summary),
+        "created_at": old[0]["created_at"],
+    })
+
+
+def _to_model_messages(system_prompt: str, rows: list[dict]) -> list[dict]:
+    out = [{"role": "system", "content": system_prompt}]
+    for r in rows:
+        out.append({"role": r["role"], "content": r["content"]})
+    return out
+
+
+# --- Session management ---
+
+@router.get("/sessions")
+def list_sessions():
+    """All conversations, newest first, for the history sidebar."""
+    with get_db() as conn:
+        rows = [row_to_dict(r) for r in conn.execute(
+            "SELECT s.id, s.title, s.created_at, s.updated_at, "
+            "COUNT(CASE WHEN m.role IN ('user','assistant') THEN 1 END) AS message_count "
+            "FROM chat_sessions s LEFT JOIN chat_messages m ON m.session_id = s.id "
+            "GROUP BY s.id ORDER BY s.updated_at DESC"
+        )]
+    return {"sessions": rows}
+
+
+@router.post("/sessions")
+def create_session():
+    sid = _ensure_session(None)
+    with get_db() as conn:
+        s = row_to_dict(conn.execute("SELECT * FROM chat_sessions WHERE id=?", (sid,)).fetchone())
+    return s
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str):
+    with get_db() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE session_id=?", (session_id,))
+        conn.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
+    return {"ok": True}
+
+
+@router.get("/sessions/{session_id}/messages")
+def get_session_messages(session_id: str):
+    """Stored conversation for display (user/assistant turns only)."""
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM chat_sessions WHERE id=?", (session_id,)).fetchone():
+            raise HTTPException(404, "Session not found")
+        rows = _load_messages(conn, session_id)
+    return {"messages": [
+        {
+            "role": r["role"],
+            "content": r["content"],
+            "actions": json.loads(r["actions"]) if r["actions"] else [],
+        }
+        for r in rows if r["role"] in ("user", "assistant")
+    ]}
+
+
+# --- Turn execution ---
+
+def _parse_tool_args(tc: dict) -> dict:
+    fn_args = tc["function"]["arguments"]
+    return json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+
+
+async def _run_turn(client: httpx.AsyncClient, session_id: str, user_message: str):
+    """Save the user turn, run the tool-calling loop with token streaming, and
+    persist the assistant reply. Yields SSE events for the UI to render live."""
+    with get_db() as conn:
+        _save_message(conn, session_id, "user", user_message)
+        _touch_session(conn, session_id, first_user_msg=user_message)
+    with get_db() as conn:
+        await _compact_if_needed(conn, client, session_id)
+    with get_db() as conn:
+        system_prompt = _build_system_prompt(conn)
+        messages = _to_model_messages(system_prompt, _load_messages(conn, session_id))
+
+    actions: list[dict] = []
+    final_reply = "Reached tool call limit."
+    think = CHAT_THINK
+
+    for _ in range(6):  # max tool-call rounds
+        content_parts: list[str] = []
+        tool_calls: list[dict] = []
+        produced = False  # have we emitted any token this round yet?
+
+        while True:  # retries once without `think` if the model rejects it
+            payload = {
+                "model": MODEL_NAME,
+                "messages": messages,
+                "tools": CHAT_TOOLS,
+                "stream": True,
+                "options": {"temperature": 0.7, "num_predict": 1024},
+            }
+            if think:
+                payload["think"] = True
+            try:
+                async with client.stream("POST", f"{VLLM_URL}/api/chat", json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.strip():
+                            continue
+                        chunk = json.loads(line)
+                        m = chunk.get("message", {})
+                        if m.get("thinking"):
+                            produced = True
+                            yield {"type": "thinking", "delta": m["thinking"]}
+                        if m.get("content"):
+                            produced = True
+                            content_parts.append(m["content"])
+                            yield {"type": "content", "delta": m["content"]}
+                        if m.get("tool_calls"):
+                            tool_calls.extend(m["tool_calls"])
+                        if chunk.get("done"):
+                            break
+                break
+            except httpx.HTTPStatusError:
+                # Model likely doesn't support `think`: drop it and retry the round
+                # (safe only because nothing has streamed yet).
+                if think and not produced:
+                    think = False
+                    content_parts, tool_calls = [], []
+                    continue
+                raise
+
+        content = "".join(content_parts)
+        assistant_msg = {"role": "assistant", "content": content}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        if not tool_calls:
+            final_reply = content
+            break
+
+        for tc in tool_calls:
+            result = _execute_tool(tc["function"]["name"], _parse_tool_args(tc))
+            actions.append(result)
+            yield {"type": "action", "data": result}
+            messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False)})
+
+    with get_db() as conn:
+        _save_message(conn, session_id, "assistant", final_reply, actions)
+        _touch_session(conn, session_id)
+    yield {"type": "done", "reply": final_reply, "actions": actions, "session_id": session_id}
+
+
+@router.post("/stream")
+async def chat_stream(msg: ChatMessage):
+    """Streaming chat — emits thinking/content deltas, tool actions, then done."""
+    session_id = _ensure_session(msg.session_id)
+
+    async def gen():
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+        client = httpx.AsyncClient(timeout=120.0)
+        try:
+            async for event in _run_turn(client, session_id, msg.message):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except httpx.ConnectError:
+            err = {"type": "error", "message": "Ollama not reachable. Start with: docker compose --profile ai up"}
+            yield f"data: {json.dumps(err)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'AI error: {e}'})}\n\n"
+        finally:
+            await client.aclose()
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",  # disable proxy buffering so deltas flush live
+    })
 
 
 @router.post("")
 async def chat(msg: ChatMessage):
-    with get_db() as conn:
-        system_prompt = _build_system_prompt(conn)
-
-    history_msgs = [{"role": h.role, "content": h.content} for h in msg.history]
-    messages: list[dict] = [
-        {"role": "system", "content": system_prompt},
-        *history_msgs,
-        {"role": "user", "content": msg.message},
-    ]
-
-    actions: list[dict] = []
-
+    """Non-streaming fallback — drains the streamed turn into a single response."""
+    session_id = _ensure_session(msg.session_id)
     async with httpx.AsyncClient(timeout=120.0) as client:
         try:
-            for _ in range(6):  # max tool-call rounds
-                resp = await client.post(
-                    f"{VLLM_URL}/api/chat",
-                    json={
-                        "model": MODEL_NAME,
-                        "messages": messages,
-                        "tools": CHAT_TOOLS,
-                        "stream": False,
-                        "options": {"temperature": 0.7, "num_predict": 1024},
-                    },
-                )
-                resp.raise_for_status()
-                assistant_msg = resp.json()["message"]
-                messages.append(assistant_msg)
-
-                tool_calls = assistant_msg.get("tool_calls") or []
-                if not tool_calls:
-                    return {"reply": assistant_msg.get("content", ""), "actions": actions, "ok": True}
-
-                for tc in tool_calls:
-                    fn_name = tc["function"]["name"]
-                    fn_args = tc["function"]["arguments"]
-                    if isinstance(fn_args, str):
-                        fn_args = json.loads(fn_args)
-                    result = _execute_tool(fn_name, fn_args)
-                    actions.append(result)
-                    messages.append({"role": "tool", "content": json.dumps(result, ensure_ascii=False)})
-
-            return {"reply": "Reached tool call limit.", "actions": actions, "ok": True}
-
+            reply, actions = "", []
+            async for event in _run_turn(client, session_id, msg.message):
+                if event["type"] == "done":
+                    reply, actions = event["reply"], event["actions"]
+            return {"reply": reply, "actions": actions, "session_id": session_id, "ok": True}
         except httpx.ConnectError:
-            return {"reply": "Ollama not reachable. Start with: docker compose --profile ai up", "actions": [], "ok": False}
+            return {"reply": "Ollama not reachable. Start with: docker compose --profile ai up",
+                    "actions": [], "session_id": session_id, "ok": False}
         except Exception as e:
-            return {"reply": f"AI error: {str(e)}", "actions": [], "ok": False}
+            return {"reply": f"AI error: {str(e)}", "actions": [], "session_id": session_id, "ok": False}
