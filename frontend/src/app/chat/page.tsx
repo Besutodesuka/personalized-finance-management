@@ -1,6 +1,7 @@
 'use client'
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { api, BASE } from '@/lib/api'
+import Markdown from '@/components/Markdown'
 
 interface Action {
   ok: boolean
@@ -275,10 +276,16 @@ export default function ChatPage() {
                 {(m.content || !streamingLast) && (
                   <div
                     className={`max-w-[80%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
-                      m.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-900'
+                      m.role === 'user'
+                        ? 'bg-indigo-600 text-white whitespace-pre-wrap'
+                        : 'bg-gray-100 text-gray-900'
                     }`}
                   >
-                    {m.content || (streamingLast ? '…' : '')}
+                    {m.role === 'assistant'
+                      ? m.content
+                        ? <Markdown>{m.content}</Markdown>
+                        : (streamingLast ? '…' : '')
+                      : (m.content || (streamingLast ? '…' : ''))}
                   </div>
                 )}
                 {streamingLast && !m.content && !m.thinking && (

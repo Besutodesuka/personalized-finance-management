@@ -118,8 +118,10 @@ def init_db():
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_chat_seq ON chat_messages (seq);
-            CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages (session_id);
         """)
+        # idx_chat_session is created in migrate_schema, after the session_id
+        # column is guaranteed to exist — legacy DBs predate that column, so
+        # indexing it here (before migration) would fail on an old chat_messages.
 
 
 def migrate_schema():
@@ -138,6 +140,8 @@ def migrate_schema():
         chat_cols = [row[1] for row in conn.execute("PRAGMA table_info(chat_messages)")]
         if chat_cols and "session_id" not in chat_cols:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+        # Safe now: column exists on both fresh (init_db) and migrated legacy DBs.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages (session_id)")
         orphans = conn.execute(
             "SELECT COUNT(*) FROM chat_messages WHERE session_id = '' OR session_id IS NULL"
         ).fetchone()[0]
